@@ -22,7 +22,7 @@ final class Response extends Message
     private $reason;
     private $request;
     private $body;
-    private $completionPromise;
+    private $trailers;
     private $previousResponse;
 
     public function __construct(
@@ -32,7 +32,7 @@ final class Response extends Message
         array $headers,
         InputStream $body,
         Request $request,
-        ?Promise $completionPromise = null,
+        ?Promise $trailers = null,
         ?Response $previousResponse = null
     ) {
         $this->protocolVersion = $protocolVersion;
@@ -40,7 +40,7 @@ final class Response extends Message
         $this->reason = $reason;
         $this->body = new Payload($body);
         $this->request = $request;
-        $this->completionPromise = $completionPromise ?? new Success;
+        $this->trailers = $trailers ?? new Success(new Trailers([]));
         $this->previousResponse = $previousResponse;
 
         /** @noinspection PhpUnhandledExceptionInspection */
@@ -230,15 +230,23 @@ final class Response extends Message
         return $clone;
     }
 
-    public function getCompletionPromise(): Promise
+    /**
+     * @return Promise<Trailers>
+     */
+    public function getTrailers(): Promise
     {
-        return $this->completionPromise;
+        return $this->trailers;
     }
 
-    public function withCompletionPromise(Promise $promise): self
+    /**
+     * @param Promise<Trailers> $trailers
+     *
+     * @return Response
+     */
+    public function withTrailers(Promise $trailers): self
     {
         $clone = clone $this;
-        $clone->completionPromise = $promise;
+        $clone->trailers = $trailers;
 
         return $clone;
     }

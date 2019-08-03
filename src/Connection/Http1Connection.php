@@ -20,6 +20,7 @@ use Amp\Http\Client\RequestBody;
 use Amp\Http\Client\Response;
 use Amp\Http\Client\SocketException;
 use Amp\Http\Client\TimeoutException;
+use Amp\Http\Client\Trailers;
 use Amp\Http\InvalidHeaderException;
 use Amp\Http\Rfc7230;
 use Amp\Loop;
@@ -128,7 +129,7 @@ final class Http1Connection implements Connection
             $request = yield from $this->buildRequest($request);
             $protocolVersion = $this->determineProtocolVersion($request);
 
-            $completionDeferred = new Deferred;
+            $trailersDeferred = new Deferred;
 
             if ($request->getTransferTimeout() > 0) {
                 $timeoutToken = new TimeoutCancellationToken($request->getTransferTimeout());
@@ -140,14 +141,14 @@ final class Http1Connection implements Connection
             $cancellationId = $readingCancellation->subscribe([$this, 'close']);
 
             $busy = &$this->busy;
-            $completionDeferred->promise()->onResolve(static function () use (&$busy, $readingCancellation, $cancellationId) {
+            $trailersDeferred->promise()->onResolve(static function () use (&$busy, $readingCancellation, $cancellationId) {
                 $readingCancellation->unsubscribe($cancellationId);
                 $busy = false;
             });
 
             try {
                 yield from $this->writeRequest($request, $protocolVersion);
-                return yield from $this->doRead($request, $cancellation, $readingCancellation, $completionDeferred);
+                return yield from $this->doRead($request, $cancellation, $readingCancellation, $trailersDeferred);
             } finally {
                 $cancellation->throwIfRequested();
             }
@@ -177,7 +178,7 @@ final class Http1Connection implements Connection
      * @param Request           $request
      * @param CancellationToken $originalCancellation
      * @param CancellationToken $readingCancellation
-     * @param Deferred          $completionDeferred
+     * @param Deferred          $trailersDeferred
      *
      * @return \Generator
      * @throws ParseException
@@ -188,7 +189,7 @@ final class Http1Connection implements Connection
         Request $request,
         CancellationToken $originalCancellation,
         CancellationToken $readingCancellation,
-        Deferred $completionDeferred
+        Deferred $trailersDeferred
     ): \Generator {
         $bodyEmitter = new Emitter;
 
@@ -197,7 +198,12 @@ final class Http1Connection implements Connection
             $backpressure = $bodyEmitter->emit($data);
         };
 
-        $parser = new Http1Parser($request, $bodyCallback);
+        $trailers = [];
+        $trailersCallback = static function (array $headers) use (&$trailers): void {
+            $trailers = $headers;
+        };
+
+        $parser = new Http1Parser($request, $bodyCallback, $trailersCallback);
 
         try {
             while (null !== $chunk = yield $this->socket->read()) {
@@ -212,7 +218,7 @@ final class Http1Connection implements Connection
 
                 $response = $response
                     ->withBody(new ResponseBodyStream(new IteratorStream($bodyEmitter->iterate()), $bodyCancellationSource))
-                    ->withCompletionPromise($completionDeferred->promise());
+                    ->withTrailers($trailersDeferred->promise());
 
                 // Read body async
                 asyncCall(function () use (
@@ -220,11 +226,12 @@ final class Http1Connection implements Connection
                     $request,
                     $response,
                     $bodyEmitter,
-                    $completionDeferred,
+                    $trailersDeferred,
                     $originalCancellation,
                     $readingCancellation,
                     $bodyCancellationToken,
-                    &$backpressure
+                    &$backpressure,
+                    &$trailers
                 ) {
                     try {
                         // Required, otherwise responses without body hang
@@ -268,12 +275,12 @@ final class Http1Connection implements Connection
                         }
 
                         $bodyEmitter->complete();
-                        $completionDeferred->resolve();
+                        $trailersDeferred->resolve(new Trailers($trailers));
                     } catch (\Throwable $e) {
                         $this->close();
 
                         $bodyEmitter->fail($e);
-                        $completionDeferred->fail($e);
+                        $trailersDeferred->fail($e);
                     }
                 });
 

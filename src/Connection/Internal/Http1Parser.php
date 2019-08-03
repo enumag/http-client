@@ -67,13 +67,17 @@ final class Http1Parser
     /** @var int */
     private $maxBodyBytes;
 
-    /** @var callable */
+    /** @var callable|null */
     private $bodyDataCallback;
 
-    public function __construct(Request $request, callable $bodyDataCallback = null)
+    /** @var callable|null */
+    private $trailersCallback;
+
+    public function __construct(Request $request, ?callable $bodyDataCallback = null, ?callable $trailersCallback = null)
     {
         $this->request = $request;
         $this->bodyDataCallback = $bodyDataCallback;
+        $this->trailersCallback = $trailersCallback;
         $this->maxHeaderBytes = $request->getHeaderSizeLimit();
         $this->maxBodyBytes = $request->getBodySizeLimit();
     }
@@ -394,15 +398,19 @@ final class Http1Parser
      */
     private function parseTrailers(string $trailers): void
     {
-        $trailerHeaders = $this->parseRawHeaders($trailers);
+        try {
+            $trailers = Rfc7230::parseHeaders($trailers);
+        } catch (InvalidHeaderException $e) {
+            throw new ParseException('Invalid trailers', Status::BAD_REQUEST, $e);
+        }
 
         unset(
-            $trailerHeaders['transfer-encoding'],
-            $trailerHeaders['content-length'],
-            $trailerHeaders['trailer']
+            $trailers['transfer-encoding'],
+            $trailers['content-length'],
+            $trailers['trailer']
         );
 
-        // TODO: Do something with the trailers
+        ($this->trailersCallback)($trailers);
     }
 
     /**
